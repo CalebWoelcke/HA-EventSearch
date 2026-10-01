@@ -8,11 +8,12 @@ class LocalEventScoutPanel extends HTMLElement {
     if (!this._hass) return;
     this._loaded = true;
     try {
-      const state = await this._hass.callApi("GET", "/api/local_event_scout/config");
+      // hass.callApi already prefixes "/api/", so paths must be relative to it.
+      const state = await this._hass.callApi("GET", "local_event_scout/config");
       this._state = state;
       this._render();
     } catch (err) {
-      this._error = `Could not load Event Scout: ${err.message || err}`;
+      this._error = `Could not load Event Scout: ${this._errorText(err)}`;
       this._render();
     }
   }
@@ -96,7 +97,7 @@ class LocalEventScoutPanel extends HTMLElement {
   async _save() {
     this._error = "";
     try {
-      this._state = await this._hass.callApi("POST", "/api/local_event_scout/config", {
+      this._state = await this._hass.callApi("POST", "local_event_scout/config", {
         locations: this._locations(), interests: this._tags("#interests"), dislikes: this._tags("#dislikes"),
         schedule: this.querySelector("#schedule").value, model: this.querySelector("#model").value,
         search_engine: this.querySelector("#engine").value, max_results: Number(this.querySelector("#max-results").value),
@@ -108,7 +109,7 @@ class LocalEventScoutPanel extends HTMLElement {
   async _scan() {
     this._error = "";
     this._state.scanning = true; this._render();
-    try { this._state = await this._hass.callApi("POST", "/api/local_event_scout/run", {}); }
+    try { this._state = await this._hass.callApi("POST", "local_event_scout/run", {}); }
     catch (err) { this._error = this._errorText(err); this._state.scanning = false; }
     this._render();
   }

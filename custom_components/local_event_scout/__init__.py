@@ -46,7 +46,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             frontend_url_path=PANEL_URL,
             sidebar_title="Event Scout",
             sidebar_icon="mdi:calendar-search",
-            module_url=f"/{DOMAIN}_panel/event-scout-panel.js?v=0.1.1",
+            module_url=f"/{DOMAIN}_panel/event-scout-panel.js?v=0.1.2",
             require_admin=False,
         )
         hass.data[DOMAIN]["panel_registered"] = True
