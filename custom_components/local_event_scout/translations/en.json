@@ -1,0 +1,14 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect OpenRouter",
+        "description": "Enter an OpenRouter API key. It is stored in Home Assistant's config entry and is never shown in the Event Scout panel.",
+        "data": {
+          "api_key": "OpenRouter API key",
+          "model": "Default model"
+        }
+      }
+    }
+  }
+}

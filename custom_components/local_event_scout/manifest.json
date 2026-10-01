@@ -1,0 +1,10 @@
+{
+  "domain": "local_event_scout",
+  "name": "Local Event Scout",
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://github.com/example/local-event-scout",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "version": "0.1.0"
+}
