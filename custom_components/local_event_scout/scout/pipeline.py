@@ -79,7 +79,7 @@ class ScoutPipeline:
         report = progress or (lambda _msg: None)
         today = now.date()
 
-        await self._locate_locations(profile.locations)
+        await self.locate_locations(profile.locations)
 
         jobs: list[tuple[Location, Bucket, list[Interest]]] = []
         for bucket in profile.buckets:
@@ -115,9 +115,9 @@ class ScoutPipeline:
                 event = self._normalise(raw, loc, bucket, profile, now, result)
                 if event is None:
                     continue
-                existing = _find_duplicate(candidates, event)
+                existing = find_duplicate(candidates, event)
                 if existing:
-                    _merge(existing, event)
+                    merge_event(existing, event)
                     result.drop("duplicate")
                 else:
                     candidates[event["id"]] = event
@@ -252,7 +252,7 @@ class ScoutPipeline:
 
     # ---------------------------------------------------------------- distance
 
-    async def _locate_locations(self, locations: list[Location]) -> None:
+    async def locate_locations(self, locations: list[Location]) -> None:
         for loc in locations:
             if loc.lat is None or loc.lon is None:
                 point = await self.geocoder.lookup(loc.text)
@@ -388,7 +388,7 @@ def _match_interest(text: str, interests: list[Interest]) -> Interest | None:
     return best if SequenceMatcher(None, best.name.lower(), lowered).ratio() >= 0.6 else None
 
 
-def _find_duplicate(candidates: dict[str, dict[str, Any]], event: dict[str, Any]) -> dict[str, Any] | None:
+def find_duplicate(candidates: dict[str, dict[str, Any]], event: dict[str, Any]) -> dict[str, Any] | None:
     if event["id"] in candidates:
         return candidates[event["id"]]
     title = normalize_title(event["title"])
@@ -399,7 +399,7 @@ def _find_duplicate(candidates: dict[str, dict[str, Any]], event: dict[str, Any]
     return None
 
 
-def _merge(existing: dict[str, Any], new: dict[str, Any]) -> None:
+def merge_event(existing: dict[str, Any], new: dict[str, Any]) -> None:
     """Fill gaps in an existing candidate from a duplicate sighting."""
     for key in ("venue", "address", "town", "summary", "category", "end"):
         if not existing.get(key) and new.get(key):

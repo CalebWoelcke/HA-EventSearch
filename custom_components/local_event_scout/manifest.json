@@ -1,10 +1,13 @@
 {
   "domain": "local_event_scout",
   "name": "Local Event Scout",
-  "codeowners": [],
+  "codeowners": ["@CalebWoelcke"],
   "config_flow": true,
-  "documentation": "https://github.com/example/local-event-scout",
+  "dependencies": ["frontend", "http", "panel_custom"],
+  "documentation": "https://github.com/CalebWoelcke/HA-EventSearch",
+  "integration_type": "service",
   "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/CalebWoelcke/HA-EventSearch/issues",
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

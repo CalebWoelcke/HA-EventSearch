@@ -3,10 +3,56 @@
     "step": {
       "user": {
         "title": "Connect OpenRouter",
-        "description": "Enter an OpenRouter API key. It is stored in Home Assistant's config entry and is never shown in the Event Scout panel.",
+        "description": "Enter an OpenRouter API key. It stays on your Home Assistant server and is never shown in the Event Scout page. Set a monthly spending limit on the key in OpenRouter.",
         "data": {
           "api_key": "OpenRouter API key",
-          "model": "Default model"
+          "model": "Model"
+        }
+      },
+      "reconfigure": {
+        "title": "Change OpenRouter API key",
+        "data": {
+          "api_key": "OpenRouter API key"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "OpenRouter rejected this API key.",
+      "cannot_connect": "Could not reach OpenRouter. Check the connection and try again."
+    },
+    "abort": {
+      "already_configured": "Local Event Scout is already set up.",
+      "reconfigure_successful": "API key updated."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "never": "Never run",
+          "ok": "OK",
+          "scanning": "Searching",
+          "error": "Error",
+          "budget": "Budget used up"
+        }
+      },
+      "picks": { "name": "Upcoming picks" },
+      "monthly_spend": { "name": "OpenRouter spend this month" },
+      "last_run_cost": { "name": "Last search cost" }
+    },
+    "calendar": {
+      "picks_calendar": { "name": "Picks" }
+    }
+  },
+  "services": {
+    "scan_now": {
+      "name": "Search now",
+      "description": "Search for events right away.",
+      "fields": {
+        "force": {
+          "name": "All distance groups",
+          "description": "Search every distance group, not only the ones due today."
         }
       }
     }

@@ -1,0 +1,6 @@
+scan_now:
+  fields:
+    force:
+      default: true
+      selector:
+        boolean:

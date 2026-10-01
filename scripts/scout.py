@@ -17,15 +17,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime
+import importlib.util
 import json
 import os
 from pathlib import Path
 import sys
 from zoneinfo import ZoneInfo
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "custom_components" / "local_event_scout"))
+import aiohttp
 
-import aiohttp  # noqa: E402
+# Load the integration's HA-free ``scout`` package by path. (Adding the integration
+# folder to sys.path would let its calendar.py shadow the standard library.)
+_PKG = Path(__file__).resolve().parents[1] / "custom_components" / "local_event_scout" / "scout"
+_spec = importlib.util.spec_from_file_location("scout", _PKG / "__init__.py", submodule_search_locations=[str(_PKG)])
+sys.modules["scout"] = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(sys.modules["scout"])
 
 from scout.models import DEFAULT_BUCKETS, Interest, Location, Profile  # noqa: E402
 from scout.openrouter import OpenRouterClient  # noqa: E402
