@@ -21,6 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities: AddC
             StatusSensor(coordinator, "status"),
             PicksSensor(coordinator, "picks"),
             MonthlySpendSensor(coordinator, "monthly_spend"),
+            WebSearchesSensor(coordinator, "web_searches"),
             LastRunCostSensor(coordinator, "last_run_cost"),
         ]
     )
@@ -70,7 +71,7 @@ class PicksSensor(EventScoutEntity, SensorEntity):
 
 
 class MonthlySpendSensor(EventScoutEntity, SensorEntity):
-    """OpenRouter usage this UTC month for the whole API key."""
+    """OpenRouter: real usage for the whole key this UTC month. Gemini: Event Scout's estimate."""
 
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_native_unit_of_measurement = "USD"
@@ -79,20 +80,43 @@ class MonthlySpendSensor(EventScoutEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        spend = self.coordinator.results.get("spend") or {}
-        return spend.get("usage_monthly")
+        if self.coordinator.provider == "openrouter":
+            return (self.coordinator.results.get("spend") or {}).get("usage_monthly")
+        return self.coordinator.month_cost()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         spend = self.coordinator.results.get("spend") or {}
-        return {
-            "limit": spend.get("limit"),
-            "limit_remaining": spend.get("limit_remaining"),
-            "limit_reset": spend.get("limit_reset"),
-            "usage_today": spend.get("usage_daily"),
-            "event_scout_this_month": self.coordinator._month_cost(),  # noqa: SLF001
-            "fetched_at": spend.get("fetched_at"),
+        attrs: dict[str, Any] = {
+            "provider": self.coordinator.provider,
+            "event_scout_this_month": self.coordinator.month_cost(),
         }
+        if self.coordinator.provider == "openrouter":
+            attrs |= {
+                "limit": spend.get("limit"),
+                "limit_remaining": spend.get("limit_remaining"),
+                "limit_reset": spend.get("limit_reset"),
+                "usage_today": spend.get("usage_daily"),
+                "fetched_at": spend.get("fetched_at"),
+            }
+        else:
+            attrs["estimated"] = True
+        return attrs
+
+
+class WebSearchesSensor(EventScoutEntity, SensorEntity):
+    _attr_icon = "mdi:web"
+    _attr_native_unit_of_measurement = "searches"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.month_web_searches()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        free = 5000 if self.coordinator.provider == "gemini" else None
+        return {"free_per_month": free} if free else {}
 
 
 class LastRunCostSensor(EventScoutEntity, SensorEntity):

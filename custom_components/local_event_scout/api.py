@@ -11,7 +11,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
-from .const import API_FEEDBACK, API_RUN, API_STATE, DOMAIN, FEEDBACK_VERDICTS
+from .const import API_FEEDBACK, API_RUN, API_SOURCES, API_STATE, DOMAIN, FEEDBACK_VERDICTS
 
 
 def _coordinator(hass: HomeAssistant):
@@ -102,7 +102,26 @@ class EventScoutFeedbackView(_ScoutView):
         return self.json(state)
 
 
+class EventScoutSourcesView(_ScoutView):
+    """Add, update or remove a saved source page."""
+
+    url = API_SOURCES
+    name = f"api:{DOMAIN}:sources"
+
+    async def post(self, request: web.Request) -> web.Response:
+        self._require_admin(request)
+        coordinator = self._get(request)
+        try:
+            state = await coordinator.async_source_action(await self._body(request))
+        except ValueError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        except KeyError:
+            return self.json_message("That source is not saved.", HTTPStatus.NOT_FOUND)
+        return self.json(state)
+
+
 def async_register_views(hass: HomeAssistant) -> None:
+    hass.http.register_view(EventScoutSourcesView)
     hass.http.register_view(EventScoutStateView)
     hass.http.register_view(EventScoutRunView)
     hass.http.register_view(EventScoutFeedbackView)

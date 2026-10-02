@@ -1,4 +1,4 @@
-"""Home Assistant glue: storage, scheduling, weather, spend and feedback.
+"""Home Assistant glue: storage, scheduling, weather, spend, feedback and saved sources.
 
 All search logic lives in the ``scout`` package; this module only feeds it
 settings from Home Assistant and stores what comes back.
@@ -22,11 +22,28 @@ from homeassistant.helpers.event import async_track_time_change, async_track_tim
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import BUDGET_FLOOR, DEFAULT_MODEL, DOMAIN, SEARCH_ENGINES, SIGNAL_UPDATE, VERSION
+from .const import (
+    BUDGET_FLOOR,
+    CONF_GEMINI_KEY,
+    CONF_GEMINI_SEARCH_KEY,
+    CONF_PROVIDER,
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_GEMINI_SEARCH_MODEL,
+    DEFAULT_MODEL,
+    DOMAIN,
+    GEMINI_FREE_SEARCHES,
+    PROVIDER_GEMINI,
+    PROVIDER_OPENROUTER,
+    SEARCH_ENGINES,
+    SIGNAL_UPDATE,
+    VERSION,
+)
 from .scout.dates import in_window, parse_event_time
-from .scout.models import DEFAULT_BUCKET_ID, DEFAULT_BUCKETS, Bucket, Interest, Location, Profile, to_dict
+from .scout.models import DEFAULT_BUCKET_ID, DEFAULT_BUCKETS, PRIORITIES, Bucket, Interest, Location, Profile, Source, to_dict
 from .scout.openrouter import OpenRouterClient, OpenRouterError
 from .scout.pipeline import ScoutPipeline, find_duplicate
+from .scout.providers import GeminiProvider, OpenRouterProvider
+from .scout.sources import host_of, normalize_url
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,7 +51,13 @@ CONFIG_VERSION = 2
 RESULTS_VERSION = 2
 SPEND_REFRESH = timedelta(hours=6)
 MAX_FEEDBACK = 100
-MAX_RUN_HISTORY = 30
+MAX_RUN_HISTORY = 60
+MAX_SOURCES = 40
+MAX_AUTO_SOURCES = 30
+MAX_SOURCES_PER_RUN = 12
+HEALTHY_MISSES = 3  # a source with fewer consecutive empty checks counts as working
+AUTO_PAUSE_MISSES = 4  # auto-added sources are paused after this many empty checks
+MIN_HEALTHY_SOURCES = 2  # groups with this many working sources only web-search every discovery_days
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "locations": [],
@@ -44,10 +67,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "schedule": "02:30",
     "model": DEFAULT_MODEL,
     "search_engine": "auto",
+    "gemini_model": DEFAULT_GEMINI_MODEL,
+    "gemini_search_model": DEFAULT_GEMINI_SEARCH_MODEL,
     "max_results": 8,
     "min_score": 5,
     "weather_entity": "",  # "" = first weather entity, "none" = off
     "check_links": True,
+    "auto_sources": True,
+    "discovery_days": 7,
 }
 
 
@@ -58,6 +85,8 @@ def _empty_results() -> dict[str, Any]:
         "last_run": None,
         "run_history": [],
         "bucket_scanned": {},
+        "bucket_searched": {},
+        "sources": [],
         "geocode_cache": {},
         "spend": None,
     }
@@ -98,6 +127,10 @@ class EventScoutCoordinator:
         self._unsubs: list[Callable[[], None]] = []
         self._unsub_schedule: Callable[[], None] | None = None
 
+    @property
+    def provider(self) -> str:
+        return self.entry.data.get(CONF_PROVIDER, PROVIDER_OPENROUTER)
+
     # ------------------------------------------------------------- lifecycle
 
     async def async_initialize(self) -> None:
@@ -106,8 +139,9 @@ class EventScoutCoordinator:
         self.results = {**_empty_results(), **(await self._results_store.async_load() or {})}
         self._prune(dt_util.now())
         self._schedule()
-        self._unsubs.append(async_track_time_interval(self.hass, self._refresh_spend_cb, SPEND_REFRESH))
-        self.entry.async_create_background_task(self.hass, self.async_refresh_spend(), f"{DOMAIN} spend")
+        if self.provider == PROVIDER_OPENROUTER:
+            self._unsubs.append(async_track_time_interval(self.hass, self._refresh_spend_cb, SPEND_REFRESH))
+            self.entry.async_create_background_task(self.hass, self.async_refresh_spend(), f"{DOMAIN} spend")
 
     async def async_shutdown(self) -> None:
         if self._unsub_schedule:
@@ -170,10 +204,17 @@ class EventScoutCoordinator:
         for raw in incoming.get("interests") or []:
             name = str(raw.get("name", "") if isinstance(raw, dict) else raw).strip()[:120]
             bucket = raw.get("bucket") if isinstance(raw, dict) else DEFAULT_BUCKET_ID
+            priority = raw.get("priority") if isinstance(raw, dict) else "normal"
             if not name or name.lower() in seen:
                 continue
             seen.add(name.lower())
-            interests.append({"name": name, "bucket": bucket if bucket in bucket_ids else DEFAULT_BUCKET_ID})
+            interests.append(
+                {
+                    "name": name,
+                    "bucket": bucket if bucket in bucket_ids else DEFAULT_BUCKET_ID,
+                    "priority": priority if priority in PRIORITIES else "normal",
+                }
+            )
 
         raw_buckets = {b.get("id"): b for b in incoming.get("buckets") or [] if isinstance(b, dict)}
         buckets = [to_dict(Bucket.from_dict(raw_buckets.get(d.id, {}), d)) for d in DEFAULT_BUCKETS]
@@ -190,6 +231,9 @@ class EventScoutCoordinator:
             except (TypeError, ValueError):
                 return DEFAULT_CONFIG[key]
 
+        def _str(key: str) -> str:
+            return str(incoming.get(key) or DEFAULT_CONFIG[key]).strip()[:100]
+
         engine = str(incoming.get("search_engine") or "auto").strip().lower()
         return {
             "locations": locations[:5],
@@ -197,12 +241,16 @@ class EventScoutCoordinator:
             "dislikes": _clean_words(incoming.get("dislikes", [])),
             "buckets": buckets,
             "schedule": schedule,
-            "model": str(incoming.get("model") or DEFAULT_MODEL).strip(),
+            "model": _str("model"),
             "search_engine": engine if engine in SEARCH_ENGINES else "auto",
+            "gemini_model": _str("gemini_model"),
+            "gemini_search_model": _str("gemini_search_model"),
             "max_results": _int("max_results", 1, 20),
             "min_score": _int("min_score", 0, 10),
             "weather_entity": str(incoming.get("weather_entity") or "").strip(),
             "check_links": bool(incoming.get("check_links", True)),
+            "auto_sources": bool(incoming.get("auto_sources", True)),
+            "discovery_days": _int("discovery_days", 1, 60),
         }
 
     async def async_save_config(self, incoming: dict[str, Any]) -> dict[str, Any]:
@@ -262,26 +310,36 @@ class EventScoutCoordinator:
     def public_state(self) -> dict[str, Any]:
         return {
             "version": VERSION,
+            "provider": self.provider,
             "config": self.config,
             "events": self.upcoming_events(),
+            "sources": self.results["sources"],
             "last_run": self.results.get("last_run"),
             "status": self.status,
             "scanning": self.scanning,
             "progress": self.progress,
             "spend": self.results.get("spend"),
-            "month_cost": self._month_cost(),
+            "month_cost": self.month_cost(),
+            "month_web_searches": self.month_web_searches(),
+            "free_searches": GEMINI_FREE_SEARCHES if self.provider == PROVIDER_GEMINI else None,
             "next_due": self._next_due(),
             "weather_entities": sorted(self.hass.states.async_entity_ids("weather")),
         }
 
-    def _month_cost(self) -> float:
+    def _this_month(self) -> list[dict[str, Any]]:
         month = dt_util.now().strftime("%Y-%m")
-        return round(sum(r.get("cost", 0) for r in self.results["run_history"] if r.get("started", "").startswith(month)), 4)
+        return [r for r in self.results["run_history"] if r.get("started", "").startswith(month)]
+
+    def month_cost(self) -> float:
+        return round(sum(r.get("cost", 0) for r in self._this_month()), 4)
+
+    def month_web_searches(self) -> int:
+        return sum(r.get("web_searches") or 0 for r in self._this_month())
 
     def _next_due(self) -> dict[str, str]:
         today = dt_util.now().date()
-        due = {}
         used = {i["bucket"] for i in self.config["interests"]}
+        due = {}
         for bucket in self.config["buckets"]:
             if bucket["id"] not in used:
                 continue
@@ -312,6 +370,8 @@ class EventScoutCoordinator:
                 }
             )
         self.results["feedback"] = log[-MAX_FEEDBACK:]
+        if verdict == "like" and self.config["auto_sources"] and event.get("listing_url"):
+            self._add_source(event["listing_url"], event["bucket"], event.get("venue") or "", "liked")
         await self._results_store.async_save(self.results)
         self._notify()
         return self.public_state()
@@ -323,9 +383,99 @@ class EventScoutCoordinator:
             if f.get("verdict") == verdict
         ]
 
+    # ---------------------------------------------------------------- sources
+
+    def _find_source(self, url: str) -> dict[str, Any] | None:
+        key = normalize_url(url)
+        return next((s for s in self.results["sources"] if normalize_url(s["url"]) == key), None)
+
+    def _add_source(self, url: str, bucket: str, name: str, origin: str) -> dict[str, Any] | None:
+        url = url.strip()
+        if not normalize_url(url) or self._find_source(url):
+            return None
+        sources = self.results["sources"]
+        if len(sources) >= MAX_SOURCES:
+            return None
+        if origin != "manual" and sum(1 for s in sources if s["origin"] != "manual") >= MAX_AUTO_SOURCES:
+            return None
+        source = {
+            "url": url,
+            "name": (name or host_of(url))[:80],
+            "bucket": bucket if bucket in {b.id for b in DEFAULT_BUCKETS} else DEFAULT_BUCKET_ID,
+            "origin": origin,  # manual | auto | liked
+            "enabled": True,
+            "added": dt_util.utcnow().isoformat(),
+            "last_checked": None,
+            "last_found": 0,
+            "found_total": 0,
+            "misses": 0,
+            "last_error": None,
+            "paused_reason": None,
+        }
+        sources.append(source)
+        return source
+
+    async def async_source_action(self, body: dict[str, Any]) -> dict[str, Any]:
+        action = body.get("action")
+        url = str(body.get("url") or "").strip()
+        if action == "add":
+            if not normalize_url(url):
+                raise ValueError("Enter a full web address starting with http:// or https://.")
+            if self._find_source(url):
+                raise ValueError("That page is already saved.")
+            if not self._add_source(url, str(body.get("bucket") or DEFAULT_BUCKET_ID), str(body.get("name") or ""), "manual"):
+                raise ValueError(f"You can save up to {MAX_SOURCES} sources.")
+        else:
+            source = self._find_source(url)
+            if source is None:
+                raise KeyError(url)
+            if action == "remove":
+                self.results["sources"].remove(source)
+            elif action == "update":
+                if "bucket" in body and body["bucket"] in {b.id for b in DEFAULT_BUCKETS}:
+                    source["bucket"] = body["bucket"]
+                if "enabled" in body:
+                    source["enabled"] = bool(body["enabled"])
+                    if source["enabled"]:
+                        source["misses"] = 0
+                        source["paused_reason"] = None
+                if body.get("name"):
+                    source["name"] = str(body["name"])[:80]
+            else:
+                raise ValueError("Unknown source action.")
+        await self._results_store.async_save(self.results)
+        self._notify()
+        return self.public_state()
+
+    def _sources_to_read(self, bucket_ids: list[str]) -> list[Source]:
+        candidates = [s for s in self.results["sources"] if s["enabled"] and s["bucket"] in bucket_ids]
+        candidates.sort(key=lambda s: s.get("last_checked") or "")  # least recently checked first
+        return [Source(s["url"], s["bucket"], s["name"]) for s in candidates[:MAX_SOURCES_PER_RUN]]
+
+    def _healthy_sources(self, bucket_id: str) -> int:
+        return sum(
+            1 for s in self.results["sources"] if s["enabled"] and s["bucket"] == bucket_id and s["misses"] < HEALTHY_MISSES
+        )
+
+    def _update_source_stats(self, stats: dict[str, dict[str, Any]], when: str) -> None:
+        for url, stat in stats.items():
+            source = self._find_source(url)
+            if source is None:
+                continue
+            source["last_checked"] = when
+            source["last_found"] = stat["found"]
+            source["found_total"] += stat["found"]
+            source["last_error"] = stat["error"]
+            source["misses"] = 0 if stat["found"] else source["misses"] + 1
+            if source["origin"] != "manual" and source["misses"] >= AUTO_PAUSE_MISSES:
+                source["enabled"] = False
+                source["paused_reason"] = stat["error"] or f"No matching events in the last {AUTO_PAUSE_MISSES} checks"
+
     # ------------------------------------------------------------------ spend
 
     async def async_refresh_spend(self) -> None:
+        if self.provider != PROVIDER_OPENROUTER:
+            return
         client = OpenRouterClient(async_get_clientsession(self.hass), self.entry.data[CONF_API_KEY])
         try:
             info = await client.key_info()
@@ -337,6 +487,19 @@ class EventScoutCoordinator:
             for key in ("usage", "usage_daily", "usage_weekly", "usage_monthly", "limit", "limit_remaining", "limit_reset")
         } | {"fetched_at": dt_util.utcnow().isoformat()}
         self._notify()
+
+    def _llm(self, session):
+        if self.provider == PROVIDER_GEMINI:
+            return GeminiProvider(
+                session,
+                search_key=self.entry.data[CONF_GEMINI_SEARCH_KEY],
+                process_key=self.entry.data.get(CONF_GEMINI_KEY) or None,
+                search_model=self.config["gemini_search_model"],
+                process_model=self.config["gemini_model"],
+            )
+        return OpenRouterProvider(
+            OpenRouterClient(session, self.entry.data[CONF_API_KEY]), self.config["model"], self.config["search_engine"]
+        )
 
     # ------------------------------------------------------------------- scan
 
@@ -367,30 +530,45 @@ class EventScoutCoordinator:
         due = self._next_due()
         return [b["id"] for b in self.config["buckets"] if b["id"] in used and (force or due[b["id"]] <= today)]
 
+    def _search_buckets(self, bucket_ids: list[str], force: bool, now: datetime) -> list[str]:
+        """Buckets to web-search: all when forced; otherwise skip groups with enough working sources."""
+        if force:
+            return list(bucket_ids)
+        chosen = []
+        for bucket_id in bucket_ids:
+            last = self.results["bucket_searched"].get(bucket_id)
+            recent = last and now - datetime.fromisoformat(last) < timedelta(days=self.config["discovery_days"], hours=-2)
+            if self._healthy_sources(bucket_id) < MIN_HEALTHY_SOURCES or not recent:
+                chosen.append(bucket_id)
+        return chosen
+
     async def _async_scan(self, force: bool) -> None:
         bucket_ids = self._due_buckets(force)
         if not bucket_ids:
             _LOGGER.debug("Nightly check: no distance group is due")
             return
         started = dt_util.now()
-        run: dict[str, Any] = {"started": started.isoformat(), "forced": force}
+        run: dict[str, Any] = {"started": started.isoformat(), "forced": force, "provider": self.provider}
         self.progress = "Starting…"
         self._notify()
         try:
-            await self.async_refresh_spend()
-            spend = self.results.get("spend") or {}
-            remaining = spend.get("limit_remaining")
-            if isinstance(remaining, (int, float)) and remaining < BUDGET_FLOOR:
-                run.update(status="budget", error=f"OpenRouter limit nearly used up (${remaining:.2f} left); scan skipped.")
-                return
+            search_ids = self._search_buckets(bucket_ids, force, started)
+            notes = []
+            if self.provider == PROVIDER_OPENROUTER:
+                await self.async_refresh_spend()
+                remaining = (self.results.get("spend") or {}).get("limit_remaining")
+                if isinstance(remaining, (int, float)) and remaining < BUDGET_FLOOR:
+                    run.update(status="budget", error=f"OpenRouter limit nearly used up (${remaining:.2f} left); scan skipped.")
+                    return
+            elif search_ids and self.month_web_searches() >= GEMINI_FREE_SEARCHES - 50:
+                search_ids = []
+                notes.append("Monthly free Google searches nearly used up; only saved sources were read.")
 
             weather = await self._weather_summary()
             session = async_get_clientsession(self.hass)
             pipeline = ScoutPipeline(
                 session,
-                OpenRouterClient(session, self.entry.data[CONF_API_KEY]),
-                model=self.config["model"],
-                engine=self.config["search_engine"],
+                self._llm(session),
                 tz=dt_util.get_default_time_zone(),
                 tz_name=self.hass.config.time_zone,
                 geocode_cache=self.results["geocode_cache"],
@@ -411,6 +589,8 @@ class EventScoutCoordinator:
                 profile,
                 now=started,
                 bucket_ids=bucket_ids,
+                search_bucket_ids=search_ids,
+                sources=self._sources_to_read(bucket_ids),
                 liked=self._feedback_examples("like"),
                 disliked=self._feedback_examples("dislike"),
                 weather=weather,
@@ -418,18 +598,35 @@ class EventScoutCoordinator:
             )
             new_count = self._merge_events(result.events)
             self._remember_coordinates(profile.locations)
+            stamp = started.isoformat()
             for bucket_id in result.buckets_scanned:
-                self.results["bucket_scanned"][bucket_id] = started.isoformat()
+                self.results["bucket_scanned"][bucket_id] = stamp
+            for bucket_id in result.buckets_searched:
+                self.results["bucket_searched"][bucket_id] = stamp
+            self._update_source_stats(result.source_stats, stamp)
+            added = []
+            if self.config["auto_sources"]:
+                for suggestion in result.suggested_sources:
+                    if self._add_source(suggestion["url"], suggestion["bucket"], suggestion["name"], "auto"):
+                        added.append(suggestion["url"])
+            if added:
+                notes.append(f"Saved {len(added)} new source{'s' if len(added) > 1 else ''}.")
             run.update(
                 status="error" if result.errors and not result.events else "ok",
                 error="; ".join(result.errors[:3]),
+                note=" ".join(notes),
                 searches=result.searches,
+                web_searches=result.web_searches,
+                pages_read=result.pages_read,
                 cost=round(result.cost, 5),
                 candidates=result.candidates,
                 kept=len(result.events),
                 new=new_count,
                 dropped=result.dropped,
                 buckets=result.buckets_scanned,
+                buckets_searched=result.buckets_searched,
+                calls=result.calls,
+                sources_added=added,
             )
         except asyncio.CancelledError:
             run.update(status="error", error="Scan was cancelled.")
@@ -443,15 +640,17 @@ class EventScoutCoordinator:
             run["finished"] = dt_util.now().isoformat()
             run.setdefault("cost", 0)
             self.results["last_run"] = run
-            self.results["run_history"] = (self.results["run_history"] + [run])[-MAX_RUN_HISTORY:]
+            history_entry = {k: v for k, v in run.items() if k != "calls"}
+            self.results["run_history"] = (self.results["run_history"] + [history_entry])[-MAX_RUN_HISTORY:]
             self._prune(dt_util.now())
             self.progress = ""
             await self._results_store.async_save(self.results)
             self._notify()
-            if run.get("searches"):
+            if run.get("searches") or run.get("pages_read"):
                 self.entry.async_create_background_task(self.hass, self.async_refresh_spend(), f"{DOMAIN} spend")
 
     def _merge_events(self, events: list[dict[str, Any]]) -> int:
+        """Add new events and refresh known ones. Nothing is removed here (see _prune)."""
         stored: dict[str, dict[str, Any]] = self.results["events"]
         now = dt_util.utcnow().isoformat()
         new = 0
@@ -478,6 +677,7 @@ class EventScoutCoordinator:
             self.hass.async_create_task(self._config_store.async_save(self.config))
 
     def _prune(self, now: datetime) -> None:
+        """Remove events a day after they have finished."""
         tz = dt_util.get_default_time_zone()
         keep = {}
         for event_id, event in self.results["events"].items():
@@ -530,4 +730,3 @@ def _clean_words(values: Any) -> list[str]:
     if not isinstance(values, list):
         values = str(values or "").replace("\n", ",").split(",")
     return list(dict.fromkeys(str(v).strip()[:120] for v in values if str(v).strip()))[:100]
-

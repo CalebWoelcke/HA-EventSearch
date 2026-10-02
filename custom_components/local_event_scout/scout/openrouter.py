@@ -26,6 +26,19 @@ class ChatResult:
     cost: float
     raw: dict[str, Any]
 
+    def usage_summary(self) -> dict[str, Any]:
+        """Token, search and cost figures for one call (for the usage breakdown)."""
+        usage = self.raw.get("usage") or {}
+        details = usage.get("completion_tokens_details") or {}
+        tools = usage.get("server_tool_use") or {}
+        return {
+            "cost": round(self.cost, 6),
+            "input_tokens": usage.get("prompt_tokens"),
+            "output_tokens": usage.get("completion_tokens"),
+            "reasoning_tokens": details.get("reasoning_tokens"),
+            "web_searches": tools.get("web_search_requests"),
+        }
+
 
 class OpenRouterClient:
     def __init__(

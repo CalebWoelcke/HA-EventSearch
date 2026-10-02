@@ -10,7 +10,7 @@ from typing import Any
 import aiohttp
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-USER_AGENT = "HA-EventSearch/0.2 (Home Assistant custom integration)"
+USER_AGENT = "HA-EventSearch/0.3 (Home Assistant custom integration)"
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

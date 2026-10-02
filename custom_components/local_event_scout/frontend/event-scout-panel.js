@@ -123,6 +123,9 @@ class LocalEventScoutPanel extends HTMLElement {
   }
 
   _setState(state, resetDraft = false) {
+    if (!resetDraft && this._dirty && this._tab === "settings" && this.shadowRoot.querySelector(".settings")) {
+      this._draft = this._collect();
+    }
     this._state = state;
     if (resetDraft || !this._dirty) {
       this._draft = JSON.parse(JSON.stringify(state.config));
@@ -232,6 +235,7 @@ class LocalEventScoutPanel extends HTMLElement {
       let text = `Last searched ${relative(last.finished || last.started)}`;
       if (last.note) text += ` · ${last.note}`;
       else if (last.kept !== undefined) text += ` · ${last.new || 0} new, ${money(last.cost)}`;
+      if (last.note && last.kept !== undefined) text += ` · ${last.new || 0} new, ${money(last.cost)}`;
       status.textContent = text;
       if (last.error) bannerHtml += `<p class="banner ${last.status === "ok" ? "warn" : "error"}">${esc(last.error)}</p>`;
     } else {
@@ -241,7 +245,11 @@ class LocalEventScoutPanel extends HTMLElement {
     scan.textContent = state.scanning ? "Searching…" : "Search now";
 
     const sp = state.spend;
-    if (sp && typeof sp.usage_monthly === "number") {
+    if (state.provider === "gemini") {
+      spend.style.display = "";
+      spend.title = "Estimated cost of searches on your billing project, and Google searches used of the monthly free allowance";
+      spend.textContent = `~${money(state.month_cost)} · ${state.month_web_searches} of ${Number(state.free_searches).toLocaleString()} free searches`;
+    } else if (sp && typeof sp.usage_monthly === "number") {
       spend.style.display = "";
       spend.textContent = typeof sp.limit === "number"
         ? `${money(sp.usage_monthly)} of ${money(sp.limit)} this month`
@@ -348,7 +356,8 @@ class LocalEventScoutPanel extends HTMLElement {
           ${e.summary ? `<p class="summary">${esc(e.summary)}</p>` : ""}
           <div class="meta">
             <span class="tag">${esc(this._bucketLabel(e.bucket))}</span>
-            ${e.interest ? `<span class="tag">${esc(e.interest)}</span>` : ""}
+            ${e.interest ? `<span class="tag">${e.priority === "high" ? "★ " : ""}${esc(e.interest)}</span>` : ""}
+            ${e.found_via === "source" ? `<span class="tag" title="${esc(e.source_url)}">Saved source</span>` : ""}
             ${e.outdoor ? '<span class="tag">Outdoor</span>' : ""}
             <span class="actions">
             ${action("like", e.status === "like" ? "mdi:thumb-up" : "mdi:thumb-up-outline", "Interested", e.status === "like")}
@@ -382,10 +391,14 @@ class LocalEventScoutPanel extends HTMLElement {
         <label class="inline">every <input data-f="refresh_days" type="number" min="1" max="30" value="${b.refresh_days}"> days</label>
         <span class="muted small">${(s.next_due || {})[b.id] ? `next search ${esc(s.next_due[b.id])}` : "no interests yet"}</span>
       </div>`;
+    const priorityOptions = (selected = "normal") =>
+      [["high", "High priority"], ["normal", "Normal"], ["low", "Low priority"]]
+        .map(([v, label]) => `<option value="${v}" ${v === selected ? "selected" : ""}>${label}</option>`).join("");
     const interest = (it, i) => `
       <div class="row interest" data-index="${i}">
         <input data-f="name" value="${esc(it.name)}" placeholder="e.g. indie folk concerts">
         <select data-f="bucket">${bucketOptions(it.bucket)}</select>
+        <select data-f="priority" class="priority">${priorityOptions(it.priority)}</select>
         <button class="icon" title="Remove" data-action="remove-interest" data-index="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
       </div>`;
     const weatherOptions = [
@@ -437,17 +450,91 @@ class LocalEventScoutPanel extends HTMLElement {
             <label>Minimum score for picks <input id="min_score" type="number" min="0" max="10" value="${c.min_score}"></label>
             <label>Max events per search <input id="max_results" type="number" min="1" max="20" value="${c.max_results}"></label>
             <label>Weather <select id="weather_entity">${weatherOptions}</select></label>
+            ${s.provider === "gemini" ? `
+            <label>Search model (billing project) <input id="gemini_search_model" value="${esc(c.gemini_search_model)}"></label>
+            <label>Model for everything else <input id="gemini_model" value="${esc(c.gemini_model)}"></label>` : `
             <label>Model <input id="model" value="${esc(c.model)}"></label>
-            <label>Search engine <select id="search_engine">${engines}</select></label>
+            <label>Search engine <select id="search_engine">${engines}</select></label>`}
           </div>
+          <label class="check">Once a group has two working saved sources, run its full web search every
+            <input id="discovery_days" type="number" min="1" max="60" value="${c.discovery_days}"> days</label>
           <label class="check"><input id="check_links" type="checkbox" ${c.check_links ? "checked" : ""}> Drop events whose links are broken</label>
+          <label class="check"><input id="auto_sources" type="checkbox" ${c.auto_sources ? "checked" : ""}> Save good event pages as sources automatically</label>
+          <p class="muted small">AI provider: ${s.provider === "gemini" ? "Google Gemini" : "OpenRouter"}. To switch provider or change keys: Settings → Devices &amp; services → Local Event Scout → ⋮ → Reconfigure.</p>
         </div>
+
+        ${this._sourcesHtml(bucketOptions)}
+
+        ${this._usageHtml()}
 
         <div class="save-bar">
           <span class="muted" id="dirty">${this._dirty ? "Unsaved changes" : ""}</span>
           <button class="primary" data-action="save">Save settings</button>
         </div>
       </div>`;
+  }
+
+  _sourcesHtml(bucketOptions) {
+    const sources = this._state.sources || [];
+    const origin = { manual: "Added by you", auto: "Found by search", liked: "From an event you liked" };
+    const status = (src) => {
+      if (!src.enabled) return `<span class="warn-text">Paused${src.paused_reason ? `: ${esc(src.paused_reason)}` : ""}</span>`;
+      if (!src.last_checked) return "Not checked yet";
+      const when = relative(src.last_checked);
+      if (src.last_error) return `<span class="warn-text">Last check ${when}: ${esc(src.last_error)}</span>`;
+      return `Last check ${when}: ${src.last_found} event${src.last_found === 1 ? "" : "s"} · ${src.found_total} total`;
+    };
+    const row = (src) => `
+      <div class="source ${src.enabled ? "" : "faded"}">
+        <div class="source-main">
+          <a href="${esc(src.url)}" target="_blank" rel="noreferrer noopener">${esc(src.name || src.url)}</a>
+          <span class="muted small">${esc(this._bucketLabel(src.bucket))} · ${origin[src.origin] || ""}</span>
+          <span class="muted small">${status(src)}</span>
+        </div>
+        <button class="secondary small-btn" data-action="source-toggle" data-url="${esc(src.url)}" data-enabled="${src.enabled}">${src.enabled ? "Pause" : "Resume"}</button>
+        <button class="icon" title="Remove" data-action="source-remove" data-url="${esc(src.url)}"><ha-icon icon="mdi:close"></ha-icon></button>
+      </div>`;
+    return `
+      <div class="card">
+        <h2>Saved sources</h2>
+        <p class="muted">Event pages that are read directly on each run: no web-search fee, just a little model use. Once a group has two working sources, the full web search for it only runs every few days (see Search options). Sources that keep coming up empty are paused automatically. Changes here apply right away.</p>
+        <div class="sources">${sources.map(row).join("") || '<p class="muted">None yet. They are added automatically when a search finds a good event on a venue or organiser page, or you can add one below.</p>'}</div>
+        <div class="row add-source">
+          <input id="source-url" placeholder="https://venue.example/events">
+          <select id="source-bucket">${bucketOptions("local")}</select>
+          <button class="secondary" data-action="source-add">Add source</button>
+        </div>
+      </div>`;
+  }
+
+  _usageHtml() {
+    const last = this._state.last_run;
+    if (!last || !last.calls || !last.calls.length) return "";
+    const kinds = { search: "Web search", source: "Saved sources", rank: "Scoring" };
+    const num = (v) => (typeof v === "number" ? v.toLocaleString() : "–");
+    const rows = last.calls.map((c) => `
+      <tr><td>${kinds[c.kind] || esc(c.kind)}<div class="muted small">${esc(c.label)}</div></td>
+        <td>${num(c.web_searches)}</td><td>${num(c.input_tokens)}</td><td>${num(c.output_tokens)}</td><td>${num(c.reasoning_tokens)}</td>
+        <td>${c.free_tier ? "free" : `${c.cost_estimated ? "~" : ""}${typeof c.cost === "number" ? "$" + c.cost.toFixed(4) : "–"}`}</td></tr>`).join("");
+    return `
+      <div class="card">
+        <h2>Last run cost</h2>
+        <p class="muted">${esc(relative(last.started))}: ${last.searches || 0} web-search calls, ${last.pages_read || 0} saved pages read, total ${money(last.cost)}. "Thinking" tokens are part of the output tokens.</p>
+        <div class="table-wrap"><table class="usage">
+          <thead><tr><th>Call</th><th>Searches</th><th>Input tokens</th><th>Output tokens</th><th>Thinking</th><th>Cost</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </div>`;
+  }
+
+  async _sourceAction(body) {
+    this._error = "";
+    try {
+      this._setState(await this._api("POST", "sources", body));
+    } catch (err) {
+      this._error = err.message;
+    }
+    this._renderHeader();
   }
 
   _markDirty() {
@@ -473,15 +560,22 @@ class LocalEventScoutPanel extends HTMLElement {
       lookahead_days: Number(val(row, "lookahead_days")),
       refresh_days: Number(val(row, "refresh_days")),
     }));
-    c.interests = [...root.querySelectorAll(".interest")].map((row) => ({ name: val(row, "name").trim(), bucket: val(row, "bucket") }));
+    c.interests = [...root.querySelectorAll(".interest")].map((row) => ({
+      name: val(row, "name").trim(), bucket: val(row, "bucket"), priority: val(row, "priority"),
+    }));
     c.dislikes = root.getElementById("dislikes").value.split(/[\n,]/).map((v) => v.trim()).filter(Boolean);
     c.schedule = root.getElementById("schedule").value;
     c.min_score = Number(root.getElementById("min_score").value);
     c.max_results = Number(root.getElementById("max_results").value);
     c.weather_entity = root.getElementById("weather_entity").value;
-    c.model = root.getElementById("model").value.trim();
-    c.search_engine = root.getElementById("search_engine").value;
-    c.check_links = root.getElementById("check_links").checked;
+    const opt = (id) => root.getElementById(id);
+    if (opt("model")) c.model = opt("model").value.trim();
+    if (opt("search_engine")) c.search_engine = opt("search_engine").value;
+    if (opt("gemini_model")) c.gemini_model = opt("gemini_model").value.trim();
+    if (opt("gemini_search_model")) c.gemini_search_model = opt("gemini_search_model").value.trim();
+    c.discovery_days = Number(opt("discovery_days").value);
+    c.check_links = opt("check_links").checked;
+    c.auto_sources = opt("auto_sources").checked;
     return c;
   }
 
@@ -498,18 +592,26 @@ class LocalEventScoutPanel extends HTMLElement {
       await this._feedback(target.dataset.id, target.dataset.verdict);
     } else if (action === "save") {
       await this._save();
+    } else if (action === "source-add") {
+      const url = this.shadowRoot.getElementById("source-url").value.trim();
+      const bucket = this.shadowRoot.getElementById("source-bucket").value;
+      await this._sourceAction({ action: "add", url, bucket });
+    } else if (action === "source-remove") {
+      await this._sourceAction({ action: "remove", url: target.dataset.url });
+    } else if (action === "source-toggle") {
+      await this._sourceAction({ action: "update", url: target.dataset.url, enabled: target.dataset.enabled !== "true" });
     } else if (["add-location", "remove-location", "add-interest", "remove-interest", "bulk-add"].includes(action)) {
       const draft = this._collect();
       const index = Number(target.dataset.index);
       if (action === "add-location") draft.locations.push({ city: "", region: "", country: draft.locations[0]?.country || "Canada" });
       if (action === "remove-location") draft.locations.splice(index, 1);
-      if (action === "add-interest") draft.interests.push({ name: "", bucket: "local" });
+      if (action === "add-interest") draft.interests.push({ name: "", bucket: "local", priority: "normal" });
       if (action === "remove-interest") draft.interests.splice(index, 1);
       if (action === "bulk-add") {
         const bucket = this.shadowRoot.getElementById("bulk-bucket").value;
         const names = this.shadowRoot.getElementById("bulk").value.split(/[\n,]/).map((v) => v.trim()).filter(Boolean);
         const existing = new Set(draft.interests.map((i) => i.name.toLowerCase()));
-        names.filter((n) => !existing.has(n.toLowerCase())).forEach((name) => draft.interests.push({ name, bucket }));
+        names.filter((n) => !existing.has(n.toLowerCase())).forEach((name) => draft.interests.push({ name, bucket, priority: "normal" }));
       }
       this._draft = draft;
       this._dirty = true;
@@ -638,6 +740,21 @@ const STYLES = `
   details { margin-top: 12px; }
   summary { cursor: pointer; color: var(--primary-color); }
   details textarea { margin-top: 8px; }
+  .priority { flex: 0 1 150px !important; }
+  .source { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--divider-color); }
+  .source.faded { opacity: .6; }
+  .source-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .source-main a { color: var(--primary-text-color); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .small-btn { margin: 0; padding: 6px 12px; font-size: 13px; }
+  .add-source input { flex: 3 1 240px; }
+  .add-source button { margin: 0; }
+  .warn-text { color: var(--warning-color, #c77700); }
+  .table-wrap { overflow-x: auto; }
+  table.usage { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.usage th, table.usage td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--divider-color); white-space: nowrap; }
+  table.usage th:first-child, table.usage td:first-child { text-align: left; white-space: normal; }
+  table.usage th { color: var(--secondary-text-color); font-weight: 500; }
+  #discovery_days { width: 72px; }
   .save-bar { position: sticky; bottom: 0; display: flex; justify-content: flex-end; align-items: center; gap: 14px; padding: 12px 0;
     background: linear-gradient(transparent, var(--primary-background-color) 30%); }
   @media (max-width: 600px) {

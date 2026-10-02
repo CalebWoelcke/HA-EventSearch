@@ -42,10 +42,24 @@ DEFAULT_BUCKETS: list[Bucket] = [
 DEFAULT_BUCKET_ID = "local"
 
 
+PRIORITIES = ("high", "normal", "low")
+PRIORITY_BOOST = {"high": 1, "normal": 0, "low": -1}
+
+
 @dataclass
 class Interest:
     name: str
     bucket: str = DEFAULT_BUCKET_ID
+    priority: str = "normal"
+
+
+@dataclass
+class Source:
+    """A page that lists events (venue calendar, organiser's "what's on" page)."""
+
+    url: str
+    bucket: str = DEFAULT_BUCKET_ID
+    name: str = ""
 
 
 @dataclass

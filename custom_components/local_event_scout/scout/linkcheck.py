@@ -7,7 +7,7 @@ import asyncio
 import aiohttp
 
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; HA-EventSearch/0.2; +https://www.home-assistant.io)",
+    "User-Agent": "Mozilla/5.0 (compatible; HA-EventSearch/0.3; +https://www.home-assistant.io)",
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
 
@@ -50,5 +50,26 @@ async def check_urls(session: aiohttp.ClientSession, urls: list[str], concurrenc
     async def _one(url: str) -> tuple[str, bool | None]:
         async with semaphore:
             return url, await check_url(session, url)
+
+    return dict(await asyncio.gather(*(_one(u) for u in dict.fromkeys(urls))))
+
+
+async def resolve_redirects(session: aiohttp.ClientSession, urls: list[str], concurrency: int = 5) -> dict[str, str]:
+    """Follow redirect links (e.g. Google's grounding redirects) to the real page URL."""
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _one(url: str) -> tuple[str, str]:
+        async with semaphore:
+            for method in ("HEAD", "GET"):
+                try:
+                    async with session.request(
+                        method, url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True
+                    ) as response:
+                        final = str(response.url)
+                        if final != url:
+                            return url, final
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    continue
+            return url, url
 
     return dict(await asyncio.gather(*(_one(u) for u in dict.fromkeys(urls))))

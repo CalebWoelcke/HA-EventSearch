@@ -2,6 +2,21 @@
   "config": {
     "step": {
       "user": {
+        "title": "Choose an AI provider",
+        "description": "Event Scout needs an AI model that can search the web.",
+        "menu_options": {
+          "openrouter": "OpenRouter (any model, pay per use)",
+          "gemini": "Google Gemini (AI Studio keys, mostly free)"
+        }
+      },
+      "reconfigure": {
+        "title": "Change AI provider or keys",
+        "menu_options": {
+          "openrouter": "OpenRouter",
+          "gemini": "Google Gemini (AI Studio)"
+        }
+      },
+      "openrouter": {
         "title": "Connect OpenRouter",
         "description": "Enter an OpenRouter API key. It stays on your Home Assistant server and is never shown in the Event Scout page. Set a monthly spending limit on the key in OpenRouter.",
         "data": {
@@ -9,10 +24,16 @@
           "model": "Model"
         }
       },
-      "reconfigure": {
-        "title": "Change OpenRouter API key",
+      "gemini": {
+        "title": "Connect Google Gemini",
+        "description": "Create keys at aistudio.google.com. Google Search is only available on a project with billing turned on; it includes 5,000 free searches a month, and you pay only for the tokens those searches use (a fraction of a cent each). Optionally add a second key from a free-tier project: it is used for everything except searching, at no cost.",
         "data": {
-          "api_key": "OpenRouter API key"
+          "gemini_search_key": "Search key (project with billing)",
+          "gemini_key": "Free-tier key (optional)"
+        },
+        "data_description": {
+          "gemini_search_key": "Used only for Google Search calls.",
+          "gemini_key": "Used for reading saved sources and scoring. Leave empty to use the search key for everything."
         }
       }
     },
@@ -22,7 +43,7 @@
     },
     "abort": {
       "already_configured": "Local Event Scout is already set up.",
-      "reconfigure_successful": "API key updated."
+      "reconfigure_successful": "Settings updated."
     }
   },
   "entity": {
@@ -37,12 +58,23 @@
           "budget": "Budget used up"
         }
       },
-      "picks": { "name": "Upcoming picks" },
-      "monthly_spend": { "name": "OpenRouter spend this month" },
-      "last_run_cost": { "name": "Last search cost" }
+      "picks": {
+        "name": "Upcoming picks"
+      },
+      "monthly_spend": {
+        "name": "AI spend this month"
+      },
+      "last_run_cost": {
+        "name": "Last search cost"
+      },
+      "web_searches": {
+        "name": "Web searches this month"
+      }
     },
     "calendar": {
-      "picks_calendar": { "name": "Picks" }
+      "picks_calendar": {
+        "name": "Picks"
+      }
     }
   },
   "services": {
