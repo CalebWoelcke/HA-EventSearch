@@ -182,4 +182,33 @@ async def test_good_events_suggest_their_listing_pages():
         ev("Known venue show", "2026-10-07", "Edmonton", "indie concerts") | {"listing_url": "https://known.example/events"},
     ]
     result = await run_pipeline(FakeLLM({"50": events}), geocache, ("local",), sources=[Source("https://known.example/events/", "local")])
-    assert result.suggested_sources == [{"url": "https://venue.example/whats-on/", "bucket": "local", "name": "Somewhere"}]
+    assert result.suggested_sources == [{"url": "https://venue.example/whats-on/", "bucket": "local", "name": "venue.example"}]
+
+
+def test_pick_interests_rotates_and_keeps_high_priority():
+    from scout.pipeline import pick_interests
+
+    interests = [Interest("a"), Interest("b"), Interest("c", priority="high"), Interest("d"), Interest("e", priority="low")]
+    last = {"a": "2026-10-01T02:30", "b": "2026-09-30T02:30"}
+    picked = [i.name for i in pick_interests(interests, last, 3)]
+    assert picked == ["c", "d", "e"]  # high first, then never-searched (normal before low)
+    last |= {"d": "2026-10-02T02:30", "e": "2026-10-02T02:30"}
+    assert [i.name for i in pick_interests(interests, last, 3)] == ["c", "b", "a"]  # then oldest first
+    assert len(pick_interests(interests[:2], {}, 3)) == 2
+
+
+async def test_known_events_are_listed_in_the_search_prompt():
+    geocache = {"somewhere, edmonton, alberta, canada": [53.55, -113.50]}
+    llm = FakeLLM({"50": []})
+    await run_pipeline(llm, geocache, ("local",), known_events={"local": ["Indie Band Live (2026-10-05)"]})
+    prompt = llm.calls[0]["user"]
+    assert "already known" in prompt and "- Indie Band Live (2026-10-05)" in prompt
+
+
+def test_find_duplicate_tolerates_one_day_shift_for_same_title():
+    from scout.pipeline import find_duplicate
+
+    stored = {"a": {"id": "a", "title": "Gas City Entertainment Expo 2026", "start": "2026-10-17"}}
+    assert find_duplicate(stored, {"id": "b", "title": "Gas City Entertainment Expo 2026", "start": "2026-10-18T10:00"})
+    assert not find_duplicate(stored, {"id": "c", "title": "Gas City Entertainment Expo 2026", "start": "2026-10-20"})
+    assert not find_duplicate(stored, {"id": "d", "title": "Trivia Night", "start": "2026-10-18"})

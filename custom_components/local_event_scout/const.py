@@ -4,7 +4,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "local_event_scout"
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.CALENDAR]
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 API_STATE = f"/api/{DOMAIN}/config"
 API_RUN = f"/api/{DOMAIN}/run"

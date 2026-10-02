@@ -34,6 +34,8 @@ CHARS_PER_EXTRACT = 36_000
 SOURCE_SCORE = 7  # events scoring at least this suggest their listing page as a source
 MAX_SUGGESTIONS = 5
 REDIRECT_HOSTS = ("vertexaisearch.cloud.google.com",)
+INTERESTS_PER_SEARCH = 3  # fewer interests per search = deeper results; the rest rotate in on later runs
+MAX_KNOWN_IN_PROMPT = 25
 
 
 @dataclass
@@ -51,6 +53,7 @@ class RunResult:
     calls: list[dict[str, Any]] = field(default_factory=list)
     source_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     suggested_sources: list[dict[str, Any]] = field(default_factory=list)
+    interests_searched: list[str] = field(default_factory=list)
 
     def drop(self, reason: str) -> None:
         self.dropped[reason] = self.dropped.get(reason, 0) + 1
@@ -90,6 +93,8 @@ class ScoutPipeline:
         liked: list[str] | None = None,
         disliked: list[str] | None = None,
         weather: str = "",
+        known_events: dict[str, list[str]] | None = None,
+        interest_last_searched: dict[str, str] | None = None,
         progress: Callable[[str], None] | None = None,
     ) -> RunResult:
         """Process ``bucket_ids``: read their saved sources, and web-search those in ``search_bucket_ids``."""
@@ -127,7 +132,14 @@ class ScoutPipeline:
                     events = await self._extract(home, bucket, profile, today, batch, result)
                     raw_batches.append((home, bucket, events, "source"))
 
-        # 2. Web search, two at a time.
+        # 2. Web search, two at a time, each on a rotating subset of the group's interests.
+        focus = {
+            b.id: pick_interests(profile.interests_for(b.id), interest_last_searched or {}, INTERESTS_PER_SEARCH)
+            for b in active
+            if b.id in search_ids
+        }
+        for chosen in focus.values():
+            result.interests_searched.extend(i.name for i in chosen)
         jobs = [(loc, b) for b in active if b.id in search_ids for loc in profile.locations]
         if jobs:
             semaphore = asyncio.Semaphore(2)
@@ -137,7 +149,9 @@ class ScoutPipeline:
                 nonlocal done
                 async with semaphore:
                     try:
-                        events = await self._search(loc, bucket, profile, today, result)
+                        events = await self._search(
+                            loc, bucket, focus[bucket.id], (known_events or {}).get(bucket.id, []), profile, today, result
+                        )
                     except OpenRouterError as err:
                         result.errors.append(f"{bucket.label} search near {loc.city}: {err}")
                         events = []
@@ -208,20 +222,28 @@ class ScoutPipeline:
     # ------------------------------------------------------------------ search
 
     async def _search(
-        self, loc: Location, bucket: Bucket, profile: Profile, today: date, result: RunResult
+        self,
+        loc: Location,
+        bucket: Bucket,
+        interests: list[Interest],
+        known: list[str],
+        profile: Profile,
+        today: date,
+        result: RunResult,
     ) -> list[dict[str, Any]]:
         prompt = prompts.search_prompt(
             today=today,
             tz_name=self._tz_name,
             location_text=loc.text,
             bucket=bucket,
-            interests=profile.interests_for(bucket.id),
+            interests=interests,
             dislikes=profile.dislikes,
             max_results=profile.max_results,
+            known=known[:MAX_KNOWN_IN_PROMPT],
         )
         completion = await self._llm.complete(prompts.SEARCH_SYSTEM, prompt, web_search=True, reasoning="low")
         result.searches += 1
-        result.record("search", f"{bucket.label} near {loc.city}", completion)
+        result.record("search", f"{bucket.label} near {loc.city}: {', '.join(i.name for i in interests)}", completion)
         return _events_from(completion.content)
 
     async def _extract(
@@ -468,11 +490,23 @@ def suggest_sources(events: list[dict[str, Any]], known: list[Source]) -> list[d
             continue
         seen.add(url)
         suggestions.append(
-            {"url": event["listing_url"], "bucket": event["bucket"], "name": event.get("venue") or host_of(url)}
+            {"url": event["listing_url"], "bucket": event["bucket"], "name": host_of(url)}
         )
         if len(suggestions) >= MAX_SUGGESTIONS:
             break
     return suggestions
+
+
+def pick_interests(interests: list[Interest], last_searched: dict[str, str], limit: int) -> list[Interest]:
+    """High-priority interests always, then the ones searched longest ago (never-searched first)."""
+    if len(interests) <= limit:
+        return list(interests)
+    high = [i for i in interests if i.priority == "high"]
+    rest = sorted(
+        (i for i in interests if i.priority != "high"),
+        key=lambda i: (last_searched.get(i.name, ""), i.priority == "low"),
+    )
+    return (high + rest)[: max(limit, len(high))]
 
 
 def _match_interest(text: str, interests: list[Interest]) -> Interest | None:
@@ -491,14 +525,30 @@ def _match_interest(text: str, interests: list[Interest]) -> Interest | None:
 
 
 def find_duplicate(candidates: dict[str, dict[str, Any]], event: dict[str, Any]) -> dict[str, Any] | None:
+    """Same event: similar title on the same day, or a near-identical title a day apart
+    (sources often disagree on the start of multi-day or late-night events)."""
     if event["id"] in candidates:
         return candidates[event["id"]]
     title = normalize_title(event["title"])
-    day = event["start"][:10]
+    day = _day(event["start"])
     for other in candidates.values():
-        if other["start"][:10] == day and SequenceMatcher(None, title, normalize_title(other["title"])).ratio() >= 0.85:
+        other_day = _day(other["start"])
+        if day is None or other_day is None:
+            continue
+        gap = abs((day - other_day).days)
+        if gap > 1:
+            continue
+        ratio = SequenceMatcher(None, title, normalize_title(other["title"])).ratio()
+        if ratio >= (0.85 if gap == 0 else 0.95):
             return other
     return None
+
+
+def _day(value: str) -> date | None:
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
 
 
 def merge_event(existing: dict[str, Any], new: dict[str, Any]) -> None:

@@ -56,9 +56,17 @@ def search_prompt(
     interests: list[Interest],
     dislikes: list[str],
     max_results: int,
+    known: list[str] | None = None,
 ) -> str:
     end = today + timedelta(days=bucket.lookahead_days)
     dislike_text = ", ".join(dislikes) if dislikes else "nothing specified"
+    known_text = (
+        "\nThese events are already known, so do not return them; spend your searches on finding OTHER events:\n"
+        + "\n".join(f"- {k}" for k in known)
+        + "\n"
+        if known
+        else ""
+    )
     return f"""Today is {today:%A, %B} {today.day}, {today.year} (time zone {tz_name}).
 
 Find upcoming in-person events within about {bucket.km:g} km of {location_text} that start
@@ -69,7 +77,7 @@ Skip anything matching: {dislike_text}.
 Also skip online-only events, recurring weekly specials (happy hours, wing nights) unless an
 interest asks for them, and anything whose date you cannot confirm from a source.
 Prefer the official event, venue or ticketing page as the URL. Return at most {max_results} events.
-
+{known_text}
 Return exactly this JSON shape:
 {{"events": [{{
 {_EVENT_FIELDS},

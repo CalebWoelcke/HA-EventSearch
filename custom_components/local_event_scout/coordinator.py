@@ -86,6 +86,7 @@ def _empty_results() -> dict[str, Any]:
         "run_history": [],
         "bucket_scanned": {},
         "bucket_searched": {},
+        "interest_searched": {},
         "sources": [],
         "geocode_cache": {},
         "spend": None,
@@ -137,6 +138,9 @@ class EventScoutCoordinator:
         stored = await self._config_store.async_load() or {}
         self.config = self._validate_config({**DEFAULT_CONFIG, "model": self.entry.data.get("model", DEFAULT_MODEL), **stored})
         self.results = {**_empty_results(), **(await self._results_store.async_load() or {})}
+        for source in self.results["sources"]:
+            if source.get("origin") != "manual":
+                source["name"] = host_of(source["url"])  # older versions named auto sources after a venue
         self._prune(dt_util.now())
         self._schedule()
         if self.provider == PROVIDER_OPENROUTER:
@@ -594,6 +598,8 @@ class EventScoutCoordinator:
                 liked=self._feedback_examples("like"),
                 disliked=self._feedback_examples("dislike"),
                 weather=weather,
+                known_events=self._known_events(),
+                interest_last_searched=self.results["interest_searched"],
                 progress=_progress,
             )
             new_count = self._merge_events(result.events)
@@ -603,6 +609,8 @@ class EventScoutCoordinator:
                 self.results["bucket_scanned"][bucket_id] = stamp
             for bucket_id in result.buckets_searched:
                 self.results["bucket_searched"][bucket_id] = stamp
+            for name in result.interests_searched:
+                self.results["interest_searched"][name] = stamp
             self._update_source_stats(result.source_stats, stamp)
             added = []
             if self.config["auto_sources"]:
@@ -625,6 +633,7 @@ class EventScoutCoordinator:
                 dropped=result.dropped,
                 buckets=result.buckets_scanned,
                 buckets_searched=result.buckets_searched,
+                interests_searched=result.interests_searched,
                 calls=result.calls,
                 sources_added=added,
             )
@@ -648,6 +657,13 @@ class EventScoutCoordinator:
             self._notify()
             if run.get("searches") or run.get("pages_read"):
                 self.entry.async_create_background_task(self.hass, self.async_refresh_spend(), f"{DOMAIN} spend")
+
+    def _known_events(self) -> dict[str, list[str]]:
+        """Upcoming events per group, so searches spend their effort on new ones."""
+        known: dict[str, list[str]] = {}
+        for event in self.upcoming_events():
+            known.setdefault(event["bucket"], []).append(f"{event['title']} ({event['start'][:10]})")
+        return known
 
     def _merge_events(self, events: list[dict[str, Any]]) -> int:
         """Add new events and refresh known ones. Nothing is removed here (see _prune)."""
